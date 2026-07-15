@@ -24,15 +24,16 @@ Sistema RAG para asesoramiento de viajes personalizado. Un usuario autenticado i
 
 ## 2. Arquitectura Basada en Proyectos de Referencia
 
-De `search-api` e `ingestion-api` se adoptan los siguientes patrones probados:
+De `window-shop-ai-develop` se adoptan los siguientes patrones probados:
 
 | Patrón | Descripción | Aplicación en RAG-Travel |
 |--------|-------------|--------------------------|
-| **Lifespans** | `AsyncExitStack` para inicializar DB, vector store, servicios de AI en orden. | Inicializar pgvector, Redis, Jina client, Gemini client. |
-| **Dependency Injection** | FastAPI `Depends()` para inyectar servicios y repositorios. | Inyectar `ChatService`, `EmbeddingService`, `TripRepository`. |
-| **Repository Pattern** | Capa de abstracción para acceso a datos. | `TripRepository`, `PurchaseRepository`. |
-| **Service Layer** | Lógica de negocio desacoplada de HTTP. | `ChatService` (orquesta RAG), `IngestService` (pipeline de embeddings). |
-| **Hybrid Search** | Búsqueda vectorial + keyword fusionada con RRF. | Búsqueda semántica de viajes + filtros por fecha/agencia. |
+| **Lifespans Modulares** | `AsyncExitStack` para inicializar DB, Redis, servicios de AI en orden. | Inicializar pgvector, Redis, Jina client, Gemini client. |
+| **Dependency Injection** | FastAPI `Depends()` para inyectar servicios, settings y sesiones de DB. | Inyectar `ChatService`, `EmbeddingService`, `SearchService`. |
+| **Repository Pattern** | Capa de abstracción para acceso a datos. | `MemoryRepository` (Redis), repositorios de PostgreSQL. |
+| **Service Layer** | Lógica de negocio desacoplada de HTTP en `services/`. | `ChatService`, `IngestService`, `SearchService`, `EmbeddingService`, `LLMService`, `MemoryService`. |
+| **Módulos de Dominio Autocontenidos** | Cada módulo tiene su propio `router.py`, `schemas/`, `services/`, `routes/` y `constants.py`. | `chat/`, `ingest/`, `search/`, `embeddings/`, `llm/`, `memory/`. |
+| **Router Aggregation** | `app/router.py` agrega todos los routers de dominio bajo prefijos versionados. | `/v1/chat`, `/v1/ingest/trips`, `/v1/search/trips`. |
 | **StandardResponseDto** | Wrapper uniforme de respuestas API. | `StandardResponseDto[ChatResponse]`. |
 
 ---
@@ -54,58 +55,103 @@ De `search-api` e `ingestion-api` se adoptan los siguientes patrones probados:
 
 ## 4. Estructura de Módulos FastAPI
 
-Cada módulo sigue la estructura: **`constants.py`, `router.py`, `schema.py`, `controller.py`, `service.py`**.
+Inspirado en la arquitectura modular de `window-shop-ai-develop`. Cada módulo de dominio es **autocontenido** con sus propios `router.py`, `routes/`, `schemas/`, `services/` y `constants.py`. Los módulos sin exposición HTTP directa (`embeddings`, `llm`, `memory`) mantienen `router.py` vacío para extensión futura.
 
 ```
-rag_travel/
-├── __main__.py                  # Entry point: uvicorn bootstrap
+app/
+├── __init__.py
 ├── main.py                      # FastAPI app + lifespan orchestration
 ├── router.py                    # Aggregator: include_router(chat, ingest, search)
 ├── core/
+│   ├── __init__.py
 │   ├── config.py                # Pydantic BaseSettings (.env)
-│   ├── dependencies.py          # DI comunes: DB session, HTTP clients, Redis
-│   ├── lifespan.py              # AsyncExitStack: init pgvector, Redis, Jina, Gemini
+│   ├── database.py              # SQLAlchemy async engine + session factory
+│   ├── models.py                # SQLAlchemy ORM: Trip, TripEmbedding, Purchase
+│   ├── dependencies.py          # DI comunes: get_settings, get_session
 │   └── guards/
+│       ├── __init__.py
 │       └── auth.py              # JWT dependency: get_current_user()
 │
 ├── chat/                        # ⭐ Módulo principal: Chat RAG
+│   ├── __init__.py
 │   ├── constants.py             # System prompts, RAG config, max tokens
-│   ├── router.py                # POST /chat, POST /chat/stream
-│   ├── schema.py                # ChatRequest, ChatResponse, MessageRole, StreamChunk
-│   ├── controller.py            # HTTP layer: auth, validate, delegate
-│   └── service.py               # Orchestración del pipeline RAG completo + streaming
+│   ├── router.py                # POST /v1/chat, POST /v1/chat/stream
+│   ├── routes/
+│   │   ├── __init__.py
+│   │   └── chat.py              # HTTP handlers (auth, validate, delegate)
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── chat.py              # ChatRequest, ChatResponse, StreamChunk
+│   └── services/
+│       ├── __init__.py
+│       └── chat_service.py      # Orchestración del pipeline RAG completo + streaming
 │
 ├── ingest/                      # 📥 Ingesta de datos
+│   ├── __init__.py
 │   ├── constants.py             # Batch size, chunking config
-│   ├── router.py                # POST /ingest/trips, POST /ingest/purchases
-│   ├── schema.py                # TripIngestRequest, PurchaseIngestRequest
-│   ├── controller.py            # Validación auth/API key
-│   └── service.py               # Pipeline: chunk → embed (Jina) → store (pgvector)
+│   ├── router.py                # POST /v1/ingest/trips, POST /v1/ingest/purchases
+│   ├── routes/
+│   │   ├── __init__.py
+│   │   └── ingest.py            # HTTP handlers
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── ingest.py            # TripIngestRequest, PurchaseIngestRequest, IngestResponse
+│   └── services/
+│       ├── __init__.py
+│       └── ingest_service.py    # Pipeline: chunk → embed (Jina) → store (pgvector)
 │
-├── search/                      # 🔍 Búsqueda vectorial
+├── search/                      # 🔍 Búsqueda vectorial (debug)
+│   ├── __init__.py
 │   ├── constants.py             # Top-k, similarity threshold
-│   ├── router.py                # POST /search/trips (debug)
-│   ├── schema.py                # SearchRequest, SearchResponse, SearchFilter
-│   ├── controller.py            # HTTP layer
-│   └── service.py               # Vector search con metadata filters
+│   ├── router.py                # POST /v1/search/trips
+│   ├── routes/
+│   │   ├── __init__.py
+│   │   └── search.py            # HTTP handlers
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── search.py            # SearchRequest, SearchResponse, SearchFilter, TripResult
+│   └── services/
+│       ├── __init__.py
+│       └── search_service.py    # Vector search con metadata filters
 │
 ├── embeddings/                  # 🧠 Cliente Jina Embeddings v4
+│   ├── __init__.py
 │   ├── constants.py             # Model name, dimensions (2048), base URL
-│   ├── schema.py                # EmbedRequest, EmbedResponse
-│   └── service.py               # Async client para api.jina.ai/v1/embeddings
+│   ├── router.py                # Placeholder (sin endpoints publicos)
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── embeddings.py        # EmbedRequest, EmbedResponse
+│   └── services/
+│       ├── __init__.py
+│       └── embedding_service.py # Async client para api.jina.ai/v1/embeddings
 │
 ├── llm/                         # 🤖 Cliente Google Gemini
+│   ├── __init__.py
 │   ├── constants.py             # Model name, temperature, max tokens
-│   ├── schema.py                # LLMRequest, LLMResponse, StreamChunk
-│   └── service.py               # Async client para Gemini con streaming SSE
+│   ├── router.py                # Placeholder (sin endpoints publicos)
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── llm.py               # LLMRequest, LLMResponse, StreamChunk
+│   └── services/
+│       ├── __init__.py
+│       └── llm_service.py      # Async client para Gemini con streaming SSE
 │
 ├── memory/                      # 💬 Memoria de conversación (Redis)
+│   ├── __init__.py
 │   ├── constants.py             # TTL default (3600s), max messages
-│   ├── schema.py                # ConversationMessage, ConversationHistory
-│   ├── repository.py            # RedisConversationRepository: get, add, delete
-│   └── service.py               # ConversationService: gestión de sesiones
+│   ├── router.py                # Placeholder (sin endpoints publicos)
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   └── memory.py            # ConversationMessage, ConversationHistory
+│   ├── repositories/
+│   │   ├── __init__.py
+│   │   └── memory_repository.py # RedisConversationRepository: get, add, delete
+│   └── services/
+│       ├── __init__.py
+│       └── memory_service.py    # ConversationService: gestión de sesiones
 │
 └── shared/
+    ├── __init__.py
     ├── schemas.py               # StandardResponseDto, Pagination
     └── exceptions.py            # Custom exceptions: ChatError, IngestError, etc.
 ```
@@ -468,31 +514,35 @@ data: {"chunk": "", "done": true, "referenced_trips": ["trip-001"]}
 
 ## 10. Roadmap de Implementación
 
-### Fase 1: Infraestructura Base
-- [ ] Setup FastAPI con lifespan (`AsyncExitStack`) y DI.
-- [ ] Configuración Pydantic BaseSettings (`core/config.py`).
-- [ ] Conexión PostgreSQL + pgvector.
-- [ ] Conexión Redis.
-- [ ] Guards JWT básico (`core/guards/auth.py`).
+### Fase 1: Infraestructura Base ✅
+- [x] Setup FastAPI con lifespan y DI.
+- [x] Configuración Pydantic BaseSettings (`core/config.py`).
+- [x] Conexión PostgreSQL + pgvector.
+- [x] Conexión Redis (docker-compose).
+- [x] Guards JWT básico (`core/guards/auth.py`).
+- [x] **Estructura modular** inspirada en `window-shop-ai-develop`:
+  - Módulos de dominio autocontenidos (`chat/`, `ingest/`, `search/`, `embeddings/`, `llm/`, `memory/`).
+  - Router aggregation en `app/router.py`.
+  - Service layer, schemas Pydantic, y placeholders listos.
 
 ### Fase 2: Embeddings & Ingesta
-- [ ] Módulo `embeddings` con Jina v4 client.
-- [ ] Módulo `ingest` con pipeline completo:
+- [ ] Implementar `EmbeddingService` con cliente Jina v4 (`embeddings/services/embedding_service.py`).
+- [ ] Implementar `IngestService` con pipeline completo:
   - Chunking de descripciones.
   - Generación de embeddings.
   - Upsert a PostgreSQL + pgvector.
-- [ ] Endpoints `POST /ingest/trips` y `POST /ingest/purchases`.
+- [ ] Endpoints `POST /v1/ingest/trips` y `POST /v1/ingest/purchases`.
 
 ### Fase 3: Chat RAG
-- [ ] Módulo `search` con vector search + metadata filters.
-- [ ] Módulo `llm` con Gemini client y streaming.
-- [ ] Módulo `memory` con Redis chat history.
-- [ ] Módulo `chat` con orquestación RAG completa:
+- [ ] Implementar `SearchService` con vector search + metadata filters (`search/services/search_service.py`).
+- [ ] Implementar `LLMService` con Gemini client y streaming SSE (`llm/services/llm_service.py`).
+- [ ] Implementar `MemoryRepository` en Redis (`memory/repositories/memory_repository.py`).
+- [ ] Implementar `ChatService` con orquestación RAG completa:
   - Date parsing ("este mes" → filtros dinámicos).
   - Parallel retrieval (vector search + purchases + history).
   - Prompt augmentation.
   - Streaming response.
-- [ ] Endpoints `POST /chat` y `POST /chat/stream`.
+- [ ] Endpoints `POST /v1/chat` y `POST /v1/chat/stream`.
 
 ### Fase 4: Testing & Optimización
 - [ ] Tests unitarios de services.
@@ -512,5 +562,5 @@ data: {"chunk": "", "done": true, "referenced_trips": ["trip-001"]}
 
 ---
 
-**Versión del plan**: 1.0
-**Última actualización**: 2024-07
+**Versión del plan**: 1.1
+**Última actualización**: 2026-07-13

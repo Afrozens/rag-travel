@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.models import Base
+from app.core.models import Base
 
 config = context.config
 
